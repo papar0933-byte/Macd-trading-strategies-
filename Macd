@@ -1,0 +1,594 @@
+#property copyright "Copyright 2025"
+#property version   "3.00"
+#property strict
+
+//--- Enum for different stop loss methods
+enum ENUM_SL_METHOD
+{
+   SL_FIXED,       // Fixed stop loss (pips)
+   SL_ATR,         // Stop loss based on ATR
+   SL_SWING,       // Stop loss based on swings
+};
+
+//--- Main input parameters
+input double   Lots          = 0.1;        // Base trade volume
+input bool     UseMoneyManagement = true;  // Use money management
+input double   RiskPercent   = 2.0;        // Risk percentage per trade
+input double   RiskReward    = 3.0;        // Risk to reward ratio (1:2)
+
+//=== Stop loss method selection ===
+input ENUM_SL_METHOD StopLossMethod = SL_ATR; // Stop loss method
+
+//=== Settings for each stop loss method ===
+
+// 1. Fixed stop loss settings
+input int      Fixed_SL_Points = 100;      // Fixed stop loss (pips)
+
+// 2. ATR stop loss settings
+input double   ATR_Multiplier = 1.5;       // ATR multiplier
+input int      ATR_Period     = 14;        // ATR period
+
+// 3. Swing stop loss settings
+input int      Swing_Period   = 20;        // Period for swings
+input int      Swing_Margin   = 20;        // Margin from swing (pips)
+
+// 4. Candle stop loss settings
+input int      Candle_Lookback = 10;       // Number of candles to look back
+input double   Candle_Multiplier = 2.0;    // Average candle range multiplier
+
+// 5. Percentage stop loss settings
+input double   Percent_SL     = 1.0;       // Stop loss percentage (e.g., 1%)
+
+// 6. Volatility stop loss settings
+input int      Volatility_Period = 20;     // Volatility calculation period
+input double   Volatility_Multiplier = 2.0;// Volatility multiplier
+
+//=== Minimum and maximum stop loss for all methods ===
+input int      Min_SL_Points  = 50;        // Minimum stop loss (pips)
+input int      Max_SL_Points  = 300;       // Maximum stop loss (pips)
+
+//=== MACD parameters ===
+input int      MACDFast       = 12;        // MACD Fast EMA
+input int      MACDSlow       = 26;        // MACD Slow EMA
+input int      MACDSignal     = 9;         // MACD Signal SMA
+
+//=== Global variables ===
+int handleMACD, handleATR;
+double macdBuffer[], signalBuffer[], atrBuffer[];
+datetime lastBarTime;
+double pointValue;
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                   |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   // Create MACD indicator
+   handleMACD = iMACD(_Symbol, _Period, MACDFast, MACDSlow, MACDSignal, PRICE_CLOSE);
+   if(handleMACD == INVALID_HANDLE)
+   {
+      Print("Error creating MACD indicator");
+      return(INIT_FAILED);
+   }
+   
+   // Create ATR indicator if ATR method is selected
+   if(StopLossMethod == SL_ATR)
+   {
+      handleATR = iATR(_Symbol, _Period, ATR_Period);
+      if(handleATR == INVALID_HANDLE)
+      {
+         Print("Error creating ATR indicator");
+         return(INIT_FAILED);
+      }
+   }
+   
+   // Set up arrays
+   ArraySetAsSeries(macdBuffer, true);
+   ArraySetAsSeries(signalBuffer, true);
+   ArraySetAsSeries(atrBuffer, true);
+   
+   // Initialize pointValue
+   pointValue = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   
+   // Display settings
+   Print("=== Strategy Settings ===");
+   Print("Stop loss method: ", EnumToString(StopLossMethod));
+   Print("Minimum stop loss: ", Min_SL_Points, " pips");
+   Print("Maximum stop loss: ", Max_SL_Points, " pips");
+   Print("Risk per trade: ", RiskPercent, "%");
+   Print("Risk/Reward ratio: 1:", RiskReward);
+   
+   // Display method-specific settings
+   DisplayMethodSettings();
+   
+   lastBarTime = 0;
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| Display each stop loss method settings                           |
+//+------------------------------------------------------------------+
+void DisplayMethodSettings()
+{
+   switch(StopLossMethod)
+   {
+      case SL_FIXED:
+         Print("Method: Fixed stop loss");
+         Print("  Fixed value: ", Fixed_SL_Points, " pips");
+         break;
+         
+      case SL_ATR:
+         Print("Method: ATR-based stop loss");
+         Print("  ATR period: ", ATR_Period);
+         Print("  ATR multiplier: ", ATR_Multiplier);
+         break;
+         
+      case SL_SWING:
+         Print("Method: Swing-based stop loss");
+         Print("  Swing period: ", Swing_Period);
+         Print("  Swing margin: ", Swing_Margin, " pips");
+         break;
+    
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Main function for calculating stop loss                          |
+//+------------------------------------------------------------------+
+int CalculateStopLoss(ENUM_ORDER_TYPE orderType, double entryPrice)
+{
+   int slPoints = 0;
+   
+   switch(StopLossMethod)
+   {
+      case SL_FIXED:
+         slPoints = CalculateFixedSL();
+         break;
+         
+      case SL_ATR:
+         slPoints = CalculateATRSL();
+         break;
+         
+      case SL_SWING:
+         slPoints = CalculateSwingSL(orderType, entryPrice);
+         break;
+    
+   }
+   
+   // Apply minimum and maximum limits
+   slPoints = MathMax(slPoints, Min_SL_Points);
+   slPoints = MathMin(slPoints, Max_SL_Points);
+   
+   Print("Calculated stop loss: ", slPoints, " pips");
+   return slPoints;
+}
+
+//+------------------------------------------------------------------+
+//| Method 1: Fixed stop loss                                        |
+//+------------------------------------------------------------------+
+int CalculateFixedSL()
+{
+   Print("Fixed stop loss: ", Fixed_SL_Points, " pips");
+   return Fixed_SL_Points;
+}
+
+//+------------------------------------------------------------------+
+//| Method 2: ATR-based stop loss                                    |
+//+------------------------------------------------------------------+
+int CalculateATRSL()
+{
+   if(CopyBuffer(handleATR, 0, 0, 1, atrBuffer) < 1)
+   {
+      Print("Error getting ATR. Using fixed stop loss");
+      return Fixed_SL_Points;
+   }
+   
+   double atrValue = atrBuffer[0];
+   int slPoints = (int)((atrValue * ATR_Multiplier) / pointValue);
+   
+   Print("ATR: ", atrValue, " | ATR stop loss: ", slPoints, " pips");
+   return slPoints;
+}
+
+//+------------------------------------------------------------------+
+//| Method 3: Swing-based stop loss                                  |
+//+------------------------------------------------------------------+
+int CalculateSwingSL(ENUM_ORDER_TYPE orderType, double entryPrice)
+{
+   if(orderType == ORDER_TYPE_BUY)
+   {
+      // For buy: stop below swing low
+      double swingLow = FindSwingLow(Swing_Period);
+      if(swingLow > 0)
+      {
+         int slPoints = (int)((entryPrice - swingLow) / pointValue) + Swing_Margin;
+         Print("Swing low: ", swingLow, " | Stop loss: ", slPoints, " pips");
+         return slPoints;
+      }
+   }
+   else
+   {
+      // For sell: stop above swing high
+      double swingHigh = FindSwingHigh(Swing_Period);
+      if(swingHigh > 0)
+      {
+         int slPoints = (int)((swingHigh - entryPrice) / pointValue) + Swing_Margin;
+         Print("Swing high: ", swingHigh, " | Stop loss: ", slPoints, " pips");
+         return slPoints;
+      }
+   }
+   
+   Print("No swing found. Using fixed stop loss");
+   return Fixed_SL_Points;
+}
+
+//+------------------------------------------------------------------+
+//| Method 4: Candle-based stop loss                                 |
+//+------------------------------------------------------------------+
+int CalculateCandleBasedSL()
+{
+   double totalRange = 0;
+   int count = 0;
+   
+   // Calculate average range of recent candles
+   for(int i = 1; i <= Candle_Lookback; i++)
+   {
+      double high = iHigh(_Symbol, _Period, i);
+      double low = iLow(_Symbol, _Period, i);
+      double range = high - low;
+      totalRange += range;
+      count++;
+   }
+   
+   if(count == 0)
+      return Fixed_SL_Points;
+   
+   double avgRange = totalRange / count;
+   int slPoints = (int)((avgRange * Candle_Multiplier) / pointValue);
+   
+   Print("Average candle range: ", avgRange, " | Stop loss: ", slPoints, " pips");
+   return slPoints;
+}
+
+//+------------------------------------------------------------------+
+//| Method 5: Percentage stop loss                                   |
+//+------------------------------------------------------------------+
+int CalculatePercentSL(double entryPrice)
+{
+   // Calculate stop loss based on price percentage
+   double slDistance = entryPrice * (Percent_SL / 100.0);
+   int slPoints = (int)(slDistance / pointValue);
+   
+   Print("Stop loss ", Percent_SL, "% of price: ", slPoints, " pips");
+   return slPoints;
+}
+
+//+------------------------------------------------------------------+
+//| Method 6: Volatility-based stop loss                             |
+//+------------------------------------------------------------------+
+int CalculateVolatilitySL()
+{
+   double highestHigh = 0;
+   double lowestLow = DBL_MAX;
+   
+   // Find highest high and lowest low in specified period
+   for(int i = 1; i <= Volatility_Period; i++)
+   {
+      double high = iHigh(_Symbol, _Period, i);
+      double low = iLow(_Symbol, _Period, i);
+      
+      if(high > highestHigh) highestHigh = high;
+      if(low < lowestLow) lowestLow = low;
+   }
+   
+   double volatility = highestHigh - lowestLow;
+   int slPoints = (int)((volatility * Volatility_Multiplier) / pointValue);
+   
+   Print("Volatility period ", Volatility_Period, ": ", volatility, " | Stop loss: ", slPoints, " pips");
+   return slPoints;
+}
+
+//+------------------------------------------------------------------+
+//| Find swing low                                                   |
+//+------------------------------------------------------------------+
+double FindSwingLow(int period)
+{
+   double lowest = DBL_MAX;
+   int lowestBar = -1;
+   
+   for(int i = 2; i <= period + 1; i++)
+   {
+      double low = iLow(_Symbol, _Period, i);
+      if(low < lowest)
+      {
+         lowest = low;
+         lowestBar = i;
+      }
+   }
+   
+   if(lowestBar > 1 && lowestBar <= period)
+   {
+      double prevLow = iLow(_Symbol, _Period, lowestBar + 1);
+      double nextLow = iLow(_Symbol, _Period, lowestBar - 1);
+      if(prevLow > lowest && nextLow > lowest)
+         return lowest;
+   }
+   
+   return 0;
+}
+
+//+------------------------------------------------------------------+
+//| Find swing high                                                  |
+//+------------------------------------------------------------------+
+double FindSwingHigh(int period)
+{
+   double highest = 0;
+   int highestBar = -1;
+   
+   for(int i = 2; i <= period + 1; i++)
+   {
+      double high = iHigh(_Symbol, _Period, i);
+      if(high > highest)
+      {
+         highest = high;
+         highestBar = i;
+      }
+   }
+   
+   if(highestBar > 1 && highestBar <= period)
+   {
+      double prevHigh = iHigh(_Symbol, _Period, highestBar + 1);
+      double nextHigh = iHigh(_Symbol, _Period, highestBar - 1);
+      if(prevHigh < highest && nextHigh < highest)
+         return highest;
+   }
+   
+   return 0;
+}
+
+//+------------------------------------------------------------------+
+//| Main expert function                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   // Check for new candle
+   datetime currentTime = iTime(_Symbol, _Period, 0);
+   if(lastBarTime == currentTime)
+      return;
+   lastBarTime = currentTime;
+   
+   // Get MACD data
+   if(CopyBuffer(handleMACD, 0, 0, 3, macdBuffer) < 3 ||
+      CopyBuffer(handleMACD, 1, 0, 3, signalBuffer) < 3)
+   {
+      Print("Error getting MACD");
+      return;
+   }
+   
+   // Check buy signal
+   if(macdBuffer[1] < signalBuffer[1] && macdBuffer[0] > signalBuffer[0] && macdBuffer[0] > 0)
+   {
+      if(CountPositions(POSITION_TYPE_BUY) == 0)
+      {
+         Print("=== Buy signal ===");
+         double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+         int slPoints = CalculateStopLoss(ORDER_TYPE_BUY, ask);
+         ProcessTrade(ORDER_TYPE_BUY, ask, slPoints);
+      }
+   }
+   
+   // Check sell signal
+   if(macdBuffer[1] > signalBuffer[1] && macdBuffer[0] < signalBuffer[0] && macdBuffer[0] < 0)
+   {
+      if(CountPositions(POSITION_TYPE_SELL) == 0)
+      {
+         Print("=== Sell signal ===");
+         double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+         int slPoints = CalculateStopLoss(ORDER_TYPE_SELL, bid);
+         ProcessTrade(ORDER_TYPE_SELL, bid, slPoints);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Process trade                                                    |
+//+------------------------------------------------------------------+
+void ProcessTrade(ENUM_ORDER_TYPE orderType, double entryPrice, int slPoints)
+{
+   // Calculate take profit
+   int tpPoints = CalculateTakeProfit(slPoints);
+   double currentRR = (double)tpPoints / slPoints;
+   
+   if(currentRR >= 1.5)
+   {
+      // Calculate trade volume
+      double positionSize = CalculatePositionSize(slPoints);
+      
+      // Display details
+      Print("Entry: ", entryPrice);
+      Print("Stop loss: ", slPoints, " pips");
+      Print("Take profit: ", tpPoints, " pips");
+      Print("Risk/Reward: 1:", currentRR);
+      Print("Volume: ", positionSize, " lots");
+      
+      // Open trade
+      OpenTrade(orderType, positionSize, slPoints, tpPoints);
+   }
+   else
+   {
+      Print("Trade rejected: Low risk/reward (1:", currentRR, ")");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Calculate take profit                                            |
+//+------------------------------------------------------------------+
+int CalculateTakeProfit(int slPoints)
+{
+   int tpPoints = (int)MathRound(slPoints * RiskReward);
+   tpPoints = MathMax(tpPoints, slPoints + 50); // Minimum 50 pips more than SL
+   return tpPoints;
+}
+
+//+------------------------------------------------------------------+
+//| Calculate trade volume                                           |
+//+------------------------------------------------------------------+
+double CalculatePositionSize(int slPoints)
+{
+   if(!UseMoneyManagement)
+   {
+      // Check minimum and maximum allowed volume
+      double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+      double maxVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+      double volume = MathMin(Lots, maxVolume);
+      volume = MathMax(volume, minVolume);
+      return volume;
+   }
+   
+   double accountBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double riskAmount = accountBalance * (RiskPercent / 100.0);
+   
+   // More accurate calculation for XAUUSD
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double tickSize = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+   
+   // Convert slPoints from pips to price
+   double slPriceDistance = slPoints * point;
+   
+   // Calculate risk per lot
+   double riskPerLot = (slPriceDistance / tickSize) * tickValue;
+   
+   if(riskPerLot <= 0)
+   {
+      Print("Error: riskPerLot <= 0. Using fixed volume");
+      return MathMin(Lots, 0.01); // Safe volume
+   }
+   
+   // Calculate volume
+   double lots = riskAmount / riskPerLot;
+   
+   // Apply restrictions
+   double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+   lots = NormalizeDouble(lots, 2); // Round to 2 decimal places
+   
+   // Adjust to volume step
+   if(lotStep > 0)
+      lots = MathRound(lots / lotStep) * lotStep;
+   
+   // Minimum and maximum limits
+   double minVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxVolume = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   lots = MathMax(lots, minVolume);
+   lots = MathMin(lots, maxVolume);
+   
+   // Additional restrictions for small accounts
+   if(accountBalance < 10000)
+      lots = MathMin(lots, 0.1); // Maximum 0.1 lots for accounts below 10,000
+   if(accountBalance < 5000)
+      lots = MathMin(lots, 0.05); // Maximum 0.05 lots for accounts below 5,000
+   
+   Print("Money management: Balance=", accountBalance,
+         ", RiskAmount=", riskAmount,
+         ", RiskPerLot=", riskPerLot,
+         ", Calculated Lots=", lots);
+   
+   return lots;
+}
+
+//+------------------------------------------------------------------+
+//| Open trade                                                       |
+//+------------------------------------------------------------------+
+void OpenTrade(ENUM_ORDER_TYPE orderType, double volume, int slPoints, int tpPoints)
+{
+   MqlTradeRequest request;
+   MqlTradeResult result;
+   
+   ZeroMemory(request);
+   ZeroMemory(result);
+   
+   double price = (orderType == ORDER_TYPE_BUY) ? 
+                  SymbolInfoDouble(_Symbol, SYMBOL_ASK) : 
+                  SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   
+   double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+   double slPrice = 0, tpPrice = 0;
+   
+   if(slPoints > 0)
+   {
+      if(orderType == ORDER_TYPE_BUY)
+         slPrice = price - slPoints * point;
+      else
+         slPrice = price + slPoints * point;
+   }
+   
+   if(tpPoints > 0)
+   {
+      if(orderType == ORDER_TYPE_BUY)
+         tpPrice = price + tpPoints * point;
+      else
+         tpPrice = price - tpPoints * point;
+   }
+   
+   request.action = TRADE_ACTION_DEAL;
+   request.symbol = _Symbol;
+   request.volume = volume;
+   request.type = orderType;
+   request.price = price;
+   request.sl = slPrice;
+   request.tp = tpPrice;
+   request.deviation = 10;
+   request.magic = 12345;
+   request.comment = StringFormat("MACD-%s", EnumToString(StopLossMethod));
+   
+   // Set filling mode
+   int filling = (int)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
+   if((filling & SYMBOL_FILLING_FOK) != 0)
+      request.type_filling = ORDER_FILLING_FOK;
+   else if((filling & SYMBOL_FILLING_IOC) != 0)
+      request.type_filling = ORDER_FILLING_IOC;
+   else
+      request.type_filling = ORDER_FILLING_RETURN;
+   
+   if(!OrderSend(request, result))
+   {
+      Print("Error sending order: ", GetLastError());
+   }
+   else
+   {
+      Print("Order successful: ", EnumToString(orderType), 
+            " | Method: ", EnumToString(StopLossMethod),
+            " | Volume: ", volume);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Count positions                                                  |
+//+------------------------------------------------------------------+
+int CountPositions(ENUM_POSITION_TYPE type = -1)
+{
+   int count = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
+      {
+         if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
+            PositionGetInteger(POSITION_MAGIC) == 12345)
+         {
+            if(type == -1 || PositionGetInteger(POSITION_TYPE) == type)
+               count++;
+         }
+      }
+   }
+   return count;
+}
+
+//+------------------------------------------------------------------+
+//| Deinitialization                                                 |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   if(handleMACD != INVALID_HANDLE) IndicatorRelease(handleMACD);
+   if(handleATR != INVALID_HANDLE) IndicatorRelease(handleATR);
+}
